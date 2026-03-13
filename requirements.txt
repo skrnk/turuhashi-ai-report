@@ -1,0 +1,6 @@
+pandas
+pandas_ta
+tradingview-screener
+mplfinance
+google-generativeai
+python-dotenv
