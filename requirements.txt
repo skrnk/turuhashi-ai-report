@@ -2,5 +2,5 @@ pandas
 pandas-ta
 tradingview-screener
 mplfinance
-google-generativeai
+google-genai
 python-dotenv
