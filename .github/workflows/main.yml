@@ -13,13 +13,16 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11' # 3.12より安定している3.11を推奨
+          python-version: '3.12' # 最新のpandas-taには3.12が必須
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          # tvdatafeedをURLから直接、かつ強制的にインストール
-          pip install git+https://github.com/StreamAlpha/tvdatafeed.git@master || pip install git+https://github.com/StreamAlpha/tvdatafeed.git
+          # 個別にインストールすることで、エラーの切り分けを確実にする
+          pip install pandas==2.2.2
+          pip install pandas-ta==0.3.14b0
+          pip install tradingview-screener mplfinance google-genai python-dotenv websocket-client
+          # tvdatafeedを公式GitHubから直接（認証なし・確実に）インストール
+          pip install git+https://github.com/StreamAlpha/tvdatafeed.git
       - name: Run AI Strategy
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
