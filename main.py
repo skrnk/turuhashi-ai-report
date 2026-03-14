@@ -82,8 +82,31 @@ def post_to_notion(name, strategy, judge, tier, entry_price, analysis):
 
 def post_to_discord(name, strategy, judge, tier, analysis, img_d, img_w):
     if not DISCORD_WEBHOOK: return
-    payload = {"embeds": [{"title": f"🚀 {name} 【{tier}】", "description": analysis[:1800], "color": 0x00ff00, "image": {"url": "attachment://d.png"}}, {"image": {"url": "attachment://w.png"}}]}
-    requests.post(DISCORD_WEBHOOK, data={"payload_json": json.dumps(payload)}, files={"f1": ("d.png", img_d, "image/png"), "f2": ("w.png", img_w, "image/png")})
+    
+    # 分析本文をEmbedの外に出すことで、PCで横幅いっぱいに表示させる
+    # 分析内容をコードブロックで囲むことで、等幅フォントになり読みやすさも向上
+    main_content = f"🚀 **{name} 【{tier}】**\n\n{analysis[:1900]}"
+    
+    payload = {
+        "content": main_content,
+        "embeds": [
+            {
+                "title": "テクニカルチャート監査 (日足/週足)",
+                "color": 0x00ff00, 
+                "image": {"url": "attachment://d.png"}
+            },
+            {
+                "image": {"url": "attachment://w.png"}
+            }
+        ]
+    }
+    
+    files = {
+        "f1": ("d.png", img_d, "image/png"),
+        "f2": ("w.png", img_w, "image/png")
+    }
+    
+    requests.post(DISCORD_WEBHOOK, data={"payload_json": json.dumps(payload)}, files=files)
 
 # --- 5. メイン実行 ---
 def main():
