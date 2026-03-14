@@ -2,20 +2,21 @@ name: Turuhashi AI Strategy Report
 
 on:
   schedule:
-    - cron: '0 20 * * *' # UTC 20:00 = JST 朝5:00
-  workflow_dispatch: # 手動実行用
+    - cron: '0 20 * * *'
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.12'  # 3.10から3.12へ変更
       - name: Install dependencies
         run: |
+          pip install --upgrade pip
           pip install -r requirements.txt
       - name: Run AI Strategy
         env:
