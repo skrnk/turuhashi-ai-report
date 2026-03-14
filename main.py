@@ -8,7 +8,10 @@ import io
 import time
 import requests
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+# --- タイムゾーン設定 (JST) ---
+JST = timezone(timedelta(hours=9), 'JST')
 
 # --- 初期設定 ---
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
@@ -33,7 +36,7 @@ def get_yf_symbol(symbol):
     if s in mapping: return mapping[s]
     return f"{s}.T" if s.isdigit() else s
 
-# --- 2. 憲章3.4 v2.1 判定ロジック (原本同期：デグレ防止) ---
+# --- 2. 憲章3.4 v2.1 判定ロジック (デグレ防止：完全維持) ---
 def calculate_charter_logic(data):
     if len(data) < 75: return None, "データ本数不足"
     close, high, low, vol = data['Close'], data['High'], data['Low'], data['Volume']
@@ -60,7 +63,7 @@ def create_chart_bytes(symbol, interval="1d", n_bars=70):
     try:
         yf_symbol = get_yf_symbol(symbol)
         data = yf.download(yf_symbol, period="2y", interval=interval, progress=False)
-        if data.empty: return None
+        if data.empty: return None, 0
         if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.get_level_values(0)
         plot_data = data.tail(n_bars).copy()
         plot_data['SMA25'] = data['Close'].rolling(25).mean().tail(n_bars)
@@ -69,13 +72,15 @@ def create_chart_bytes(symbol, interval="1d", n_bars=70):
         ap = [mpf.make_addplot(plot_data['SMA25'], color='orange'), mpf.make_addplot(plot_data['SMA75'], color='blue')]
         mpf.plot(plot_data, type='candle', style='charles', addplot=ap, volume=True, savefig=buf, datetime_format='%y-%m-%d', tight_layout=True)
         buf.seek(0)
-        return buf, data['Close'].iloc[-1] # 価格も返す
+        return buf, data['Close'].iloc[-1]
     except: return None, 0
 
-# --- 4. 通知・Notion処理 (Tier対応版) ---
+# --- 4. 通知・Notion処理 (日本時間対応) ---
 def post_to_notion(name, strategy, judge, tier, entry_price, analysis):
     if not NOTION_TOKEN or not NOTION_DB_ID: return
     headers = {"Authorization": f"Bearer {NOTION_TOKEN}", "Content-Type": "application/json", "Notion-Version": "2022-06-28"}
+    # Notionの日付プロパティにJST時間をセット
+    jst_now = datetime.now(JST).isoformat()
     data = {
         "parent": {"database_id": NOTION_DB_ID},
         "properties": {
@@ -84,7 +89,7 @@ def post_to_notion(name, strategy, judge, tier, entry_price, analysis):
             "Judge": {"select": {"name": judge}},
             "Tier": {"select": {"name": tier}},
             "Entry Price": {"number": entry_price},
-            "Date": {"date": {"start": datetime.now().isoformat()}},
+            "Date": {"date": {"start": jst_now}},
             "Analysis": {"rich_text": [{"text": {"content": analysis[:1900]}}]}
         }
     }
@@ -98,7 +103,7 @@ def post_to_discord(name, strategy, judge, tier, analysis, img_d, img_w):
 
 # --- 5. メイン実行 ---
 def main():
-    print("🔭 憲章3.4 v2.1 高精度・Tier選別モード開始...")
+    print(f"🔭 憲章3.4 v2.1 高精度分析モード開始 (JST: {datetime.now(JST).strftime('%Y-%m-%d %H:%M')})...")
     targets = []
     if os.path.exists('gmo_symbols.csv'):
         df_csv = pd.read_csv('gmo_symbols.csv', sep=None, engine='python')
@@ -140,7 +145,8 @@ def main():
             if not img_d or not img_w: continue
             
             chk_str = "\n".join([f"{'●' if v else '×'} {k}" for k, v in hit['Details'].items()])
-            curr_time = datetime.now().strftime('%Y-%m-%d %H:%M')
+            # --- 日本時間でフォーマット ---
+            curr_time_jst = datetime.now(JST).strftime('%Y-%m-%d %H:%M')
             
             prompt = f"""
             銘柄: {name} ({symbol})
@@ -160,7 +166,7 @@ def main():
             3. 総合評価: 上記を統合し、Tierを決定せよ。
 
             回答フォーマット厳守：
-            ■報告日次: {curr_time}
+            ■報告日次: {curr_time_jst}
             ■結論: [Tier S / Tier A / Tier B]
             ■売買執行: [EXECUTE または WAIT]
             ■判定モード: {mode}
@@ -180,8 +186,6 @@ def main():
                 genai.types.Part.from_bytes(data=img_w.read(), mime_type="image/png")])
             
             res_text = response.text
-            
-            # --- Tier B以下は通知しないフィルタリング ---
             tier = "Tier B"
             if "Tier S" in res_text: tier = "Tier S"
             elif "Tier A" in res_text: tier = "Tier A"
