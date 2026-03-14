@@ -25,28 +25,28 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 def get_gmo_list():
-    """gmo_symbols.csvから監視銘柄を取得"""
+    """gmo_symbols.csvを柔軟に読み込み (カンマ/タブ両対応)"""
     file_name = 'gmo_symbols.csv'
     if os.path.exists(file_name):
         try:
-            df = pd.read_csv(file_name)
-            df = df.drop_duplicates(subset=['Symbol'])
+            # セパレータを自動推測して読み込み
+            df = pd.read_csv(file_name, sep=None, engine='python')
+            df.columns = df.columns.str.strip() # カラム名の空白除去
             return df.to_dict('records')
         except Exception as e:
             print(f"⚠️ CSV読み込みエラー: {e}")
     return []
 
 def get_yf_symbol(ticker):
-    """yfinance形式変換 (GMO指数のマッピング)"""
     mapping = {
         "NI225": "^N225", "DJI": "^DJI", "SPX": "^GSPC", 
         "NAS100": "^IXIC", "GOLD": "GC=F", "OIL": "CL=F", "USDJPY": "JPY=X"
     }
+    ticker = str(ticker).strip()
     if ticker in mapping: return mapping[ticker]
     return f"{ticker}.T" if ticker.isdigit() else ticker
 
 def create_chart_bytes(symbol, interval="1d", n_bars=70):
-    """改良版チャート: RSI14, 25/75SMA凡例, yy-mm-dd形式"""
     try:
         yf_symbol = get_yf_symbol(symbol)
         data = yf.download(yf_symbol, period="2y", interval=interval, progress=False)
@@ -60,20 +60,17 @@ def create_chart_bytes(symbol, interval="1d", n_bars=70):
         
         plot_data = data.tail(n_bars).copy()
         buf = io.BytesIO()
-        
         ap = [
             mpf.make_addplot(plot_data['SMA25'], color='orange', width=1.5),
             mpf.make_addplot(plot_data['SMA75'], color='blue', width=1.5),
             mpf.make_addplot(plot_data['RSI'], panel=2, color='purple', ylabel='RSI')
         ]
-        
         fig, axlist = mpf.plot(
             plot_data, type='candle', style='charles', addplot=ap,
             volume=True, returnfig=True, datetime_format='%y-%m-%d',
             tight_layout=True, panel_ratios=(6,2,2)
         )
         axlist[0].legend(['SMA25 (Org)', 'SMA75 (Blu)'], loc='upper left', fontsize='8')
-        
         fig.savefig(buf, format='png')
         buf.seek(0)
         return buf
@@ -114,20 +111,38 @@ def post_to_discord(display_name, strategy, judge, analysis, img_daily, img_week
     requests.post(DISCORD_WEBHOOK, data={"payload_json": json.dumps(payload)}, files=files)
 
 def main():
-    print("🔭 憲章3.5 ハイブリッド・スキャン開始...")
+    print("🔭 憲章3.5 全域ハイブリッド・スキャン開始...")
     
-    # 1. 東証スキャン (12,000円制限)
+    # 1. 東証スキャン (条件を以前の「精鋭用」に戻す)
     try:
-        q = (Query().set_markets('japan').select('name', 'description', 'close', 'RSI')
-             .where(Column('close').le(12000), Column('type').isin(['stock', 'etf'])).limit(40).get_scanner_data())
+        q = (Query().set_markets('japan')
+             .select('name', 'description', 'close', 'RSI', 'SMA5', 'SMA20')
+             .where(
+                 Column('close').le(12000), 
+                 Column('type').isin(['stock', 'etf']),
+                 Column('RSI').gt(53), # RSIフィルターを復活
+                 Column('SMA5').gt(Column('SMA20')) # 三位一体の基礎条件
+             )
+             .limit(50).get_scanner_data())
         df_tse = pd.DataFrame(q[1])
-        scan_candidates = [{'Name': r['description'], 'Symbol': r['name'], 'Category': 'TSE_Stock'} for _, r in df_tse.iterrows()]
-    except: scan_candidates = []
+        scan_candidates = [{'Name': r['description'], 'Symbol': r['name'], 'Category': 'Active (順張り)'} for _, r in df_tse.iterrows()]
+        print(f"✅ 東証スキャン成功: {len(scan_candidates)} 銘柄発見")
+    except Exception as e:
+        print(f"⚠️ スキャンエラー: {e}")
+        scan_candidates = []
 
     # 2. GMOリスト (gmo_symbols.csv) 読み込み
-    gmo_list = get_gmo_list()
-    
-    # 3. リスト統合
+    gmo_list_raw = get_gmo_list()
+    gmo_list = []
+    for item in gmo_list_raw:
+        gmo_list.append({
+            'Name': item.get('Name', 'Index'), 
+            'Symbol': item.get('Symbol'), 
+            'Category': item.get('Category', 'Global_CFD')
+        })
+    print(f"✅ CSVロード完了: {len(gmo_list)} 銘柄")
+
+    # 3. リスト統合 (CSVを先にするが、処理上限を増やす)
     all_targets = gmo_list + scan_candidates
     seen = set()
     final_targets = []
@@ -135,13 +150,13 @@ def main():
         if t['Symbol'] not in seen:
             final_targets.append(t); seen.add(t['Symbol'])
 
-    print(f"🎯 分析対象: {len(final_targets)} 銘柄をセットしました。")
-
-    for target in final_targets[:10]: # API負荷分散のため上位10件
-        symbol = target['Symbol']
+    # 4. 分析実行 (上限を 10件 -> 25件 に拡大)
+    print(f"🎯 合計 {len(final_targets)} 銘柄から、最大25件を分析します。")
+    for target in final_targets[:25]:
+        symbol = str(target['Symbol']).strip()
         display_name = f"{target['Name']} ({symbol})"
         category = target['Category']
-        print(f"🚀 精密検証中: {display_name}")
+        print(f"🚀 検証開始: {display_name}")
         
         img_daily = create_chart_bytes(symbol, interval="1d")
         img_weekly = create_chart_bytes(symbol, interval="1wk", n_bars=40)
@@ -152,13 +167,11 @@ def main():
         回答冒頭に必ず 『【分析タイプ: {category}】』 と記載せよ。
         銘柄: {display_name}
         
-        【憲章3.5 厳格チェック項目】
-        提供された2枚のチャート（1枚目:日足, 2枚目:週足）から以下に言及せよ：
+        【憲章3.5 厳格チェック】
         1. RSI14(下段)の数値と勢い
-        2. SMA25(橙)/75(青)の序列・傾き（PineScript基準：三位一体か）
-        3. 週足チャートから見た長期トレンド整合性
-        4. キャンドルの形状（品質）から見たエントリー優位性
-
+        2. SMA25(橙)/75(青)の序列・傾き（三位一体か）
+        3. 週足トレンドの整合性
+        4. キャンドルの品質
         最後に、EXECUTE または WAIT を理由と共に示せ。
         """
         
@@ -171,12 +184,9 @@ def main():
             res_text = response.text
             judge = "EXECUTE" if "EXECUTE" in res_text.upper() else "WAIT"
             
-            # Notion保存とDiscord通知
             post_to_notion(display_name, category, judge, res_text)
             img_daily.seek(0); img_weekly.seek(0)
             post_to_discord(display_name, category, judge, res_text, img_daily, img_weekly)
-            
-            print(f"🤖 {symbol}: 判断完了")
             time.sleep(2)
         except Exception as e: print(f"⚠️ エラー({symbol}): {e}")
 
