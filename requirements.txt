@@ -1,1 +1,6 @@
-# 依存関係は main.yml 側で制御します
+pandas
+tradingview-screener
+mplfinance
+google-genai
+python-dotenv
+yfinance
