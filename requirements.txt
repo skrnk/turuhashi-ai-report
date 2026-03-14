@@ -4,3 +4,4 @@ tradingview-screener
 mplfinance
 google-genai
 python-dotenv
+git+https://github.com/noname0n/tvdatafeed.git
