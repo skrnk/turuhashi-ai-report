@@ -13,13 +13,19 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.11'
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install pandas==2.2.3 yfinance mplfinance tradingview-screener google-genai python-dotenv requests
+          curl -L https://github.com/StreamAlpha/tvdatafeed/archive/refs/heads/main.zip -o tvdatafeed.zip
+          pip install tvdatafeed.zip
       - name: Run AI Strategy
         env:
+          # ここに「GitHubのSecret」と「プログラム内の変数名」の紐付けが必要です
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TV_SESSION_ID: ${{ secrets.TV_SESSION_ID }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python main.py
