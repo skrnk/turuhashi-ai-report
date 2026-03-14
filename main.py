@@ -11,14 +11,6 @@ import time
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 MODEL_NAME = "gemini-3-flash-preview"
 
-# --- 2. 指標計算ロジック (pandas-ta不要版) ---
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
-
 def get_filtered_candidates():
     print("🔭 ステップ1: スクリーナーで広域スキャン中...")
     try:
@@ -30,39 +22,47 @@ def get_filtered_candidates():
         df = pd.DataFrame(q[1])
         if df.empty: return df
 
+        # 判定用指標
         df['candle_q'] = (df['close'] - df['low']) / (df['high'] - df['low'])
         df['dist_25'] = (df['close'] / df['SMA20'] - 1) * 100
         
+        # 憲章3.4 精密足切り
         active_df = df[(df['RSI'] > 53) & (df['SMA5'] > df['SMA20']) & (df['candle_q'] > 0.8)].copy()
-        active_df['strategy'] = 'Active'
+        active_df['strategy'] = 'Active (順張り)'
         
         sniper_df = df[(df['dist_25'] < -12) & (df['candle_q'] > 0.65)].copy()
-        sniper_df['strategy'] = 'Sniper'
+        sniper_df['strategy'] = 'Sniper (逆張り)'
         
         return pd.concat([active_df, sniper_df]).drop_duplicates(subset=['name']).head(5)
     except Exception as e:
         print(f"❌ スキャンエラー: {e}")
         return pd.DataFrame()
 
-def create_chart_bytes(symbol, strategy):
-    """yfinanceを使用してチャート画像を生成"""
+def create_chart_bytes(symbol):
+    """yfinanceの型エラーとマルチインデックスを解消してチャート生成"""
     try:
-        # 日本株コード(例: 7203)を yfinance形式(7203.T)に変換
-        yf_symbol = f"{symbol.split(':')[-1]}.T" if symbol.isdigit() or symbol.startswith('TSE:') else symbol
-        
-        # 指数などのマッピング
+        ticker = symbol.split(':')[-1]
+        yf_symbol = f"{ticker}.T" if ticker.isdigit() else ticker
         mapping = {"NI225": "^N225", "DJI": "^DJI", "SPX": "^GSPC"}
-        yf_symbol = mapping.get(symbol.split(':')[-1], yf_symbol)
+        yf_symbol = mapping.get(ticker, yf_symbol)
 
-        data = yf.download(yf_symbol, period="6mo", interval="1d", progress=False)
+        data = yf.download(yf_symbol, period="1y", interval="1d", progress=False)
         if data.empty: return None
 
-        # 指標計算
+        # yfinance 0.2.x 対策: マルチインデックスの解除
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+        
+        # 全データをfloatに強制変換（エラー: must be ALL float or int への対策）
+        cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        data = data[cols].astype(float)
+        data = data.dropna()
+
+        # 指標
         data['SMA25'] = data['Close'].rolling(window=25).mean()
         data['SMA75'] = data['Close'].rolling(window=75).mean()
         
-        # 最新60日分を描画
-        plot_data = data.tail(60)
+        plot_data = data.tail(60).copy()
         buf = io.BytesIO()
         ap = [
             mpf.make_addplot(plot_data['SMA25'], color='orange', width=1),
@@ -81,27 +81,40 @@ def main():
         print("📭 基準クリア銘柄なし")
         return
 
-    print(f"🎯 精鋭 {len(final_candidates)} 銘柄をマルチモーダル分析中...")
+    print(f"🎯 精鋭 {len(final_candidates)} 銘柄をAIマルチモーダル分析開始")
     for _, row in final_candidates.iterrows():
         name = row['name']
-        print(f"📈 分析: {name}")
+        strategy_label = row['strategy'] # "Active (順張り)" or "Sniper (逆張り)"
         
-        chart_img = create_chart_bytes(name, row['strategy'])
+        print(f"\n{'='*20} {strategy_label} 判定中: {name} {'='*20}")
         
+        chart_img = create_chart_bytes(name)
+        
+        # プロンプトの指示を「分析タイプの明記」に特化
         prompt = f"""
-        銘柄: {row.get('description', name)}
-        戦略: {row['strategy']}
-        憲章3.4に基づき、添付のチャート画像を分析してください。
-        最後に EXECUTE または WAIT の判断を下してください。
+        銘柄: {row.get('description', name)} ({name})
+        分析タイプ: {strategy_label}
+
+        【最優先指示】
+        回答の冒頭に必ず 『【分析タイプ: {strategy_label}】』 と一行目に記載すること。
+        
+        【分析指示】
+        提供されたチャート（25MA:橙, 75MA:青）を読み取り、『運用憲章3.4』に基づき
+        「なぜこのタイプ（順張りまたは逆張り）として選出されたか」を考慮して分析せよ。
+        
+        最後に、EXECUTE（実行） または WAIT（待機） を理由と共に示せ。
         """
         
         try:
             contents = [prompt]
             if chart_img:
                 contents.append(genai.types.Part.from_bytes(data=chart_img.read(), mime_type="image/png"))
+                print("📸 チャート画像の添付に成功しました。")
+            else:
+                print("⚠️ 画像なしでテキスト分析のみ実行します。")
             
             response = client.models.generate_content(model=MODEL_NAME, contents=contents)
-            print(f"🤖 Geminiの結論:\n{response.text}\n" + "="*50)
+            print(f"🤖 Geminiの結論:\n{response.text}\n")
             time.sleep(2)
         except Exception as e:
             print(f"⚠️ 分析エラー: {e}")
