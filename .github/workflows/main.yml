@@ -17,12 +17,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          # 必要なライブラリだけを確実にインストール
           pip install pandas==2.2.3 yfinance mplfinance tradingview-screener google-genai python-dotenv requests
-          curl -L https://github.com/StreamAlpha/tvdatafeed/archive/refs/heads/main.zip -o tvdatafeed.zip
-          pip install tvdatafeed.zip
       - name: Run AI Strategy
         env:
-          # ここに「GitHubのSecret」と「プログラム内の変数名」の紐付けが必要です
+          # GitHub Secretsからプログラムへ情報を渡す「橋」です
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TV_SESSION_ID: ${{ secrets.TV_SESSION_ID }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
