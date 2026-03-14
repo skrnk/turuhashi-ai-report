@@ -5,4 +5,4 @@ mplfinance
 google-genai
 python-dotenv
 websocket-client
-https://github.com/noname0n/tvdatafeed/archive/refs/heads/master.zip
+https://github.com/StreamAlpha/tvdatafeed/archive/refs/heads/main.zip
