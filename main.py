@@ -33,7 +33,7 @@ def get_yf_symbol(symbol):
     if s in mapping: return mapping[s]
     return f"{s}.T" if s.isdigit() else s
 
-# --- 2. 憲章3.4 v2.1 判定ロジック (原本同期維持) ---
+# --- 2. 憲章3.4 v2.1 判定ロジック (原本同期：デグレ防止) ---
 def calculate_charter_logic(data):
     if len(data) < 75: return None, "データ本数不足"
     close, high, low, vol = data['Close'], data['High'], data['Low'], data['Volume']
@@ -45,15 +45,17 @@ def calculate_charter_logic(data):
     rvol = (vol / vol.rolling(10).mean()).iloc[-1]
     slope_ok = sma25.iloc[-1] > sma25.iloc[-4]
     c_qual = ((close - low) / (high - low)).iloc[-1]
+    
     cond_a = {"RSI > 50": rsi > 50, "5MA > 25MA": sma5.iloc[-1] > sma25.iloc[-1], "Slope OK": slope_ok, "RVol > 1.2x": rvol > 1.2, "Price > 75MA": close.iloc[-1] > sma75.iloc[-1], "Candle > 0.7": c_qual > 0.7}
     cross_over = (close.iloc[-1] > sma5.iloc[-1]) and (close.iloc[-2] <= sma5.iloc[-2])
     cond_s = {"RSI < 40": rsi < 40, "Dist < -10%": close.iloc[-1] < sma25.iloc[-1] * 0.90, "5MA Crossover": cross_over, "Candle > 0.7": c_qual > 0.7}
+    
     if all(cond_a.values()): return "Active (順張り)", cond_a
     if all(cond_s.values()): return "Sniper (逆張り)", cond_s
     fails = [k for k, v in {**cond_a, **cond_s}.items() if not v]
     return None, f"不適合: {', '.join(fails[:3])}"
 
-# --- 3. チャート生成 (既存維持) ---
+# --- 3. チャート生成 (デグレ防止) ---
 def create_chart_bytes(symbol, interval="1d", n_bars=70):
     try:
         yf_symbol = get_yf_symbol(symbol)
@@ -67,31 +69,42 @@ def create_chart_bytes(symbol, interval="1d", n_bars=70):
         ap = [mpf.make_addplot(plot_data['SMA25'], color='orange'), mpf.make_addplot(plot_data['SMA75'], color='blue')]
         mpf.plot(plot_data, type='candle', style='charles', addplot=ap, volume=True, savefig=buf, datetime_format='%y-%m-%d', tight_layout=True)
         buf.seek(0)
-        return buf
-    except: return None
+        return buf, data['Close'].iloc[-1] # 価格も返す
+    except: return None, 0
 
-# --- 通知処理 (既存維持) ---
-def post_to_notion(name, strategy, judge, analysis):
+# --- 4. 通知・Notion処理 (Tier対応版) ---
+def post_to_notion(name, strategy, judge, tier, entry_price, analysis):
     if not NOTION_TOKEN or not NOTION_DB_ID: return
     headers = {"Authorization": f"Bearer {NOTION_TOKEN}", "Content-Type": "application/json", "Notion-Version": "2022-06-28"}
-    requests.post("https://api.notion.com/v1/pages", headers=headers, json={"parent": {"database_id": NOTION_DB_ID}, "properties": {"Name": {"title": [{"text": {"content": name}}]}, "Strategy": {"select": {"name": strategy}}, "Judge": {"select": {"name": judge}}, "Date": {"date": {"start": datetime.now().isoformat()}}, "Analysis": {"rich_text": [{"text": {"content": analysis[:1900]}}]}}})
+    data = {
+        "parent": {"database_id": NOTION_DB_ID},
+        "properties": {
+            "Name": {"title": [{"text": {"content": name}}]},
+            "Strategy": {"select": {"name": strategy}},
+            "Judge": {"select": {"name": judge}},
+            "Tier": {"select": {"name": tier}},
+            "Entry Price": {"number": entry_price},
+            "Date": {"date": {"start": datetime.now().isoformat()}},
+            "Analysis": {"rich_text": [{"text": {"content": analysis[:1900]}}]}
+        }
+    }
+    requests.post("https://api.notion.com/v1/pages", headers=headers, json=data)
 
-def post_to_discord(name, strategy, judge, analysis, img_d, img_w):
+def post_to_discord(name, strategy, judge, tier, analysis, img_d, img_w):
     if not DISCORD_WEBHOOK: return
-    color = 0x00ff00 if judge == "EXECUTE" else 0x808080
-    payload = {"embeds": [{"title": f"🚀 {name}", "description": analysis[:1800], "color": color, "image": {"url": "attachment://d.png"}}, {"image": {"url": "attachment://w.png"}}]}
+    color = 0x00ff00 if tier == "Tier S" else 0x00bfff
+    payload = {"embeds": [{"title": f"🚀 {name} [{tier}]", "description": analysis[:1800], "color": color, "image": {"url": "attachment://d.png"}}, {"image": {"url": "attachment://w.png"}}]}
     requests.post(DISCORD_WEBHOOK, data={"payload_json": json.dumps(payload)}, files={"f1": ("d.png", img_d, "image/png"), "f2": ("w.png", img_w, "image/png")})
 
 # --- 5. メイン実行 ---
 def main():
-    print("🔭 憲章3.4 v2.1 高精度分析モード開始...")
+    print("🔭 憲章3.4 v2.1 高精度・Tier選別モード開始...")
     targets = []
     if os.path.exists('gmo_symbols.csv'):
         df_csv = pd.read_csv('gmo_symbols.csv', sep=None, engine='python')
         targets = [{'Name': str(r.get('Name', r['Symbol'])), 'Symbol': str(r['Symbol'])} for _, r in df_csv.iterrows()]
     
     try:
-        # スキャニング範囲を維持
         q = Query().set_markets('japan').select('name', 'description').where(Column('close') <= 12000, Column('type').isin(['stock', 'etf'])).limit(250).get_scanner_data()
         df_scan = q[1] if isinstance(q[1], pd.DataFrame) else pd.DataFrame(q[1])
         for _, r in df_scan.iterrows():
@@ -112,55 +125,54 @@ def main():
                 t['Mode'], t['Details'] = mode, details
                 final_hits.append(t)
                 print(f"🎯 適合発見: {t['Name']} ({mode})")
-            else:
-                print(f"  [-] {t['Name']} ({t['Symbol']}) は不適合: {details}")
+            else: pass
         except: continue
 
-    print(f"🏁 最終候補: {len(final_hits)} 銘柄。AI【深度分析】を開始...")
+    print(f"🏁 最終候補: {len(final_hits)} 銘柄。AI【Tier分析】を開始...")
 
     for hit in final_hits:
         try:
             name, symbol, mode = hit['Name'], hit['Symbol'], hit['Mode']
-            img_d, img_w = create_chart_bytes(symbol, "1d"), create_chart_bytes(symbol, "1wk", 40)
+            img_d_tuple = create_chart_bytes(symbol, "1d")
+            img_w_tuple = create_chart_bytes(symbol, "1wk", 40)
+            img_d, entry_price = img_d_tuple[0], img_d_tuple[1]
+            img_w = img_w_tuple[0]
             if not img_d or not img_w: continue
             
             chk_str = "\n".join([f"{'●' if v else '×'} {k}" for k, v in hit['Details'].items()])
             curr_time = datetime.now().strftime('%Y-%m-%d %H:%M')
             
-            # --- プロンプトの超強化（ファンダメンタルズと厳格性の導入） ---
             prompt = f"""
-            あなたは機関投資家向けのシニア・エグゼクティブ・アナリストです。
-            依頼銘柄: {name} ({symbol})
-            戦略モード: {mode}
+            銘柄: {name} ({symbol})
+            判定モード: {mode}
 
-            【Step 1: テクニカル検証】
-            システムによる憲章規準チェック結果:
+            【システムによる憲章規準チェック】
             {chk_str}
-            添付の日足・週足チャートを視覚的に精査し、このテクニカル判定が「本物」か「だまし」か、特に出来高の質を含めて厳しく評価せよ。
 
-            【Step 2: ファンダメンタル分析】
-            以下の観点から、あなたの知識ベースを用いてこの企業/商品を深掘りせよ：
-            1. 事業内容の概要と現在のマーケットシェア。
-            2. 当該業界（例：半導体、物流、農業等）の現在のグローバルトレンド。
-            3. 直近の決算や外部環境（為替、金利、地政学）が与えるプラス・マイナスの影響。
+            添付の日足・週足チャートを精査し、以下のTierを決定せよ：
+            - Tier S: テクニカル・ファンダメンタル共に極めて優位性が高く、確信度が非常に高い。
+            - Tier A: 優位性は認められるが、市場環境や細部に懸念が残る。
+            - Tier B以下: 条件は満たすが、期待値が低い、または「だまし」の懸念がある。
 
-            【Step 3: 最終レコメンド】
-            テクニカルとファンダメンタルが完全に一致している場合のみ「EXECUTE」を出せ。少しでも懸念（業界の低迷、だましの形状等）があれば「WAIT」とせよ。
+            【分析指令】
+            1. ビジネスモデル解析: この企業/商品が現在直面しているマーケットトレンドと業界内地位を述べよ。
+            2. テクニカル検証: 憲章規準が「本物」か、視覚的に確証を得られるか。
+            3. 総合評価: 上記を統合し、Tierを決定せよ。
 
-            回答は必ず以下のフォーマットを厳守すること：
-
+            回答フォーマット厳守：
             ■報告日次: {curr_time}
-            ■結論: [EXECUTE または WAIT]
+            ■結論: [Tier S / Tier A / Tier B]
+            ■売買執行: [EXECUTE または WAIT]
             ■判定モード: {mode}
             ---
             【憲章規準チェック結果】
             {chk_str}
 
             【ビジネスモデル & 業界分析】
-            (ここにファンダメンタルズの詳細を記述)
+            (ここに記述)
 
             【総合分析コメント】
-            (テクニカルとファンダメンタルの整合性、リスク、今後の展望を詳述)
+            (ここに記述)
             """
             
             response = client.models.generate_content(model=MODEL_NAME, contents=[prompt, 
@@ -168,12 +180,21 @@ def main():
                 genai.types.Part.from_bytes(data=img_w.read(), mime_type="image/png")])
             
             res_text = response.text
-            judge = "EXECUTE" if "EXECUTE" in res_text.upper() else "WAIT"
             
-            post_to_notion(f"{name} ({symbol})", mode, judge, res_text)
-            img_d.seek(0); img_w.seek(0)
-            post_to_discord(f"{name} ({symbol})", mode, judge, res_text, img_d, img_w)
-            print(f"✅ 通知完了: {name}")
+            # --- Tier B以下は通知しないフィルタリング ---
+            tier = "Tier B"
+            if "Tier S" in res_text: tier = "Tier S"
+            elif "Tier A" in res_text: tier = "Tier A"
+            
+            if tier in ["Tier S", "Tier A"]:
+                judge = "EXECUTE" if "EXECUTE" in res_text.upper() else "WAIT"
+                post_to_notion(f"{name} ({symbol})", mode, judge, tier, entry_price, res_text)
+                img_d.seek(0); img_w.seek(0)
+                post_to_discord(name, mode, judge, tier, res_text, img_d, img_w)
+                print(f"✅ 通知完了[{tier}]: {name}")
+            else:
+                print(f"  [x] {name} は {tier} のため通知をスキップしました。")
+            
             time.sleep(2)
         except Exception as e: print(f"⚠️ 分析エラー: {e}")
 
