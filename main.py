@@ -17,7 +17,7 @@ NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 NOTION_DB_ID = os.environ.get("NOTION_DATABASE_ID")
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL")
 
-# --- 1. シンボル翻訳辞書 ---
+# --- 1. シンボル翻訳辞書 (デグレ防止：完全維持) ---
 def get_yf_symbol(symbol):
     s = str(symbol).split(':')[-1].strip()
     mapping = {
@@ -33,45 +33,27 @@ def get_yf_symbol(symbol):
     if s in mapping: return mapping[s]
     return f"{s}.T" if s.isdigit() else s
 
-# --- 2. 憲章3.4 v2.1 判定ロジック ---
+# --- 2. 憲章3.4 v2.1 判定ロジック (原本同期維持) ---
 def calculate_charter_logic(data):
     if len(data) < 75: return None, "データ本数不足"
     close, high, low, vol = data['Close'], data['High'], data['Low'], data['Volume']
-    
     delta = close.diff()
     avg_gain = delta.where(delta > 0, 0).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
     avg_loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
     rsi = (100 - (100 / (1 + (avg_gain / avg_loss)))).iloc[-1]
-    
     sma5, sma25, sma75 = close.rolling(5).mean(), close.rolling(25).mean(), close.rolling(75).mean()
     rvol = (vol / vol.rolling(10).mean()).iloc[-1]
     slope_ok = sma25.iloc[-1] > sma25.iloc[-4]
     c_qual = ((close - low) / (high - low)).iloc[-1]
-    
-    cond_a = {
-        "RSI > 50": rsi > 50,
-        "5MA > 25MA": sma5.iloc[-1] > sma25.iloc[-1],
-        "Slope OK": slope_ok,
-        "RVol > 1.2x": rvol > 1.2,
-        "Price > 75MA": close.iloc[-1] > sma75.iloc[-1],
-        "Candle > 0.7": c_qual > 0.7
-    }
-    
+    cond_a = {"RSI > 50": rsi > 50, "5MA > 25MA": sma5.iloc[-1] > sma25.iloc[-1], "Slope OK": slope_ok, "RVol > 1.2x": rvol > 1.2, "Price > 75MA": close.iloc[-1] > sma75.iloc[-1], "Candle > 0.7": c_qual > 0.7}
     cross_over = (close.iloc[-1] > sma5.iloc[-1]) and (close.iloc[-2] <= sma5.iloc[-2])
-    cond_s = {
-        "RSI < 40": rsi < 40,
-        "Dist < -10%": close.iloc[-1] < sma25.iloc[-1] * 0.90,
-        "5MA Crossover": cross_over,
-        "Candle > 0.7": c_qual > 0.7
-    }
-
+    cond_s = {"RSI < 40": rsi < 40, "Dist < -10%": close.iloc[-1] < sma25.iloc[-1] * 0.90, "5MA Crossover": cross_over, "Candle > 0.7": c_qual > 0.7}
     if all(cond_a.values()): return "Active (順張り)", cond_a
     if all(cond_s.values()): return "Sniper (逆張り)", cond_s
-    
     fails = [k for k, v in {**cond_a, **cond_s}.items() if not v]
     return None, f"不適合: {', '.join(fails[:3])}"
 
-# --- 3. チャート生成 ---
+# --- 3. チャート生成 (既存維持) ---
 def create_chart_bytes(symbol, interval="1d", n_bars=70):
     try:
         yf_symbol = get_yf_symbol(symbol)
@@ -88,7 +70,7 @@ def create_chart_bytes(symbol, interval="1d", n_bars=70):
         return buf
     except: return None
 
-# --- 4. 通知処理 ---
+# --- 通知処理 (既存維持) ---
 def post_to_notion(name, strategy, judge, analysis):
     if not NOTION_TOKEN or not NOTION_DB_ID: return
     headers = {"Authorization": f"Bearer {NOTION_TOKEN}", "Content-Type": "application/json", "Notion-Version": "2022-06-28"}
@@ -102,13 +84,14 @@ def post_to_discord(name, strategy, judge, analysis, img_d, img_w):
 
 # --- 5. メイン実行 ---
 def main():
-    print("🔭 憲章3.4 v2.1 監査モード開始...")
+    print("🔭 憲章3.4 v2.1 高精度分析モード開始...")
     targets = []
     if os.path.exists('gmo_symbols.csv'):
         df_csv = pd.read_csv('gmo_symbols.csv', sep=None, engine='python')
         targets = [{'Name': str(r.get('Name', r['Symbol'])), 'Symbol': str(r['Symbol'])} for _, r in df_csv.iterrows()]
     
     try:
+        # スキャニング範囲を維持
         q = Query().set_markets('japan').select('name', 'description').where(Column('close') <= 12000, Column('type').isin(['stock', 'etf'])).limit(250).get_scanner_data()
         df_scan = q[1] if isinstance(q[1], pd.DataFrame) else pd.DataFrame(q[1])
         for _, r in df_scan.iterrows():
@@ -133,25 +116,37 @@ def main():
                 print(f"  [-] {t['Name']} ({t['Symbol']}) は不適合: {details}")
         except: continue
 
-    print(f"🏁 最終候補: {len(final_hits)} 銘柄。AI分析を開始...")
+    print(f"🏁 最終候補: {len(final_hits)} 銘柄。AI【深度分析】を開始...")
 
     for hit in final_hits:
         try:
             name, symbol, mode = hit['Name'], hit['Symbol'], hit['Mode']
-            img_d = create_chart_bytes(symbol, "1d"), create_chart_bytes(symbol, "1wk", 40)
-            if not img_d[0] or not img_d[1]: continue
+            img_d, img_w = create_chart_bytes(symbol, "1d"), create_chart_bytes(symbol, "1wk", 40)
+            if not img_d or not img_w: continue
             
-            # チェックリストの構築 (●×形式)
             chk_str = "\n".join([f"{'●' if v else '×'} {k}" for k, v in hit['Details'].items()])
             curr_time = datetime.now().strftime('%Y-%m-%d %H:%M')
             
+            # --- プロンプトの超強化（ファンダメンタルズと厳格性の導入） ---
             prompt = f"""
-            分析依頼: {name} ({symbol})
+            あなたは機関投資家向けのシニア・エグゼクティブ・アナリストです。
+            依頼銘柄: {name} ({symbol})
+            戦略モード: {mode}
 
-            【システムによる憲章規準チェック】
+            【Step 1: テクニカル検証】
+            システムによる憲章規準チェック結果:
             {chk_str}
+            添付の日足・週足チャートを視覚的に精査し、このテクニカル判定が「本物」か「だまし」か、特に出来高の質を含めて厳しく評価せよ。
 
-            上記を踏まえ、添付の日足・週足チャートを分析せよ。
+            【Step 2: ファンダメンタル分析】
+            以下の観点から、あなたの知識ベースを用いてこの企業/商品を深掘りせよ：
+            1. 事業内容の概要と現在のマーケットシェア。
+            2. 当該業界（例：半導体、物流、農業等）の現在のグローバルトレンド。
+            3. 直近の決算や外部環境（為替、金利、地政学）が与えるプラス・マイナスの影響。
+
+            【Step 3: 最終レコメンド】
+            テクニカルとファンダメンタルが完全に一致している場合のみ「EXECUTE」を出せ。少しでも懸念（業界の低迷、だましの形状等）があれば「WAIT」とせよ。
+
             回答は必ず以下のフォーマットを厳守すること：
 
             ■報告日次: {curr_time}
@@ -161,17 +156,23 @@ def main():
             【憲章規準チェック結果】
             {chk_str}
 
-            【分析コメント】
-            (ここに詳細な分析を記述)
+            【ビジネスモデル & 業界分析】
+            (ここにファンダメンタルズの詳細を記述)
+
+            【総合分析コメント】
+            (テクニカルとファンダメンタルの整合性、リスク、今後の展望を詳述)
             """
             
-            response = client.models.generate_content(model=MODEL_NAME, contents=[prompt, genai.types.Part.from_bytes(data=img_d[0].read(), mime_type="image/png"), genai.types.Part.from_bytes(data=img_d[1].read(), mime_type="image/png")])
+            response = client.models.generate_content(model=MODEL_NAME, contents=[prompt, 
+                genai.types.Part.from_bytes(data=img_d.read(), mime_type="image/png"),
+                genai.types.Part.from_bytes(data=img_w.read(), mime_type="image/png")])
+            
             res_text = response.text
             judge = "EXECUTE" if "EXECUTE" in res_text.upper() else "WAIT"
             
             post_to_notion(f"{name} ({symbol})", mode, judge, res_text)
-            img_d[0].seek(0); img_d[1].seek(0)
-            post_to_discord(f"{name} ({symbol})", mode, judge, res_text, img_d[0], img_d[1])
+            img_d.seek(0); img_w.seek(0)
+            post_to_discord(f"{name} ({symbol})", mode, judge, res_text, img_d, img_w)
             print(f"✅ 通知完了: {name}")
             time.sleep(2)
         except Exception as e: print(f"⚠️ 分析エラー: {e}")
