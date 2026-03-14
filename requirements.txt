@@ -1,7 +1,8 @@
-pandas
+pandas<3.0.0
 pandas-ta
 tradingview-screener
 mplfinance
 google-genai
 python-dotenv
-tvDatafeed
+websocket-client
+https://github.com/noname0n/tvdatafeed/archive/refs/heads/master.zip
