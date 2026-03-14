@@ -1,6 +1,7 @@
 pandas
-tradingview-screener
+yfinance
 mplfinance
+tradingview-screener
 google-genai
 python-dotenv
-yfinance
+requests
