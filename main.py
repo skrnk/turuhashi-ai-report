@@ -75,11 +75,10 @@ def create_chart_bytes(symbol, interval="1d", n_bars=70):
         return buf, data['Close'].iloc[-1]
     except: return None, 0
 
-# --- 4. 通知・Notion処理 (日本時間対応) ---
+# --- 4. 通知・Notion処理 (Tier S限定・タイポ修正済) ---
 def post_to_notion(name, strategy, judge, tier, entry_price, analysis):
     if not NOTION_TOKEN or not NOTION_DB_ID: return
     headers = {"Authorization": f"Bearer {NOTION_TOKEN}", "Content-Type": "application/json", "Notion-Version": "2022-06-28"}
-    # Notionの日付プロパティにJST時間をセット
     jst_now = datetime.now(JST).isoformat()
     data = {
         "parent": {"database_id": NOTION_DB_ID},
@@ -97,13 +96,14 @@ def post_to_notion(name, strategy, judge, tier, entry_price, analysis):
 
 def post_to_discord(name, strategy, judge, tier, analysis, img_d, img_w):
     if not DISCORD_WEBHOOK: return
-    color = 0x00ff00 if tier == "Tier S" else 0x00bfff
-    payload = {"embeds": [{"title": f"🚀 {name} [{tier}]", "description": analysis[:1800], "color": color, "image": {"url": "attachment://d.png"}}, {"image": {"url": "attachment://w.png"}}]}
+    color = 0x00ff00 # Tier Sは常にグリーン
+    payload = {"embeds": [{"title": f"🚀 {name} 【{tier}】", "description": analysis[:1800], "color": color, "image": {"url": "attachment://d.png"}}, {"image": {"url": "attachment://w.png"}}]}
     requests.post(DISCORD_WEBHOOK, data={"payload_json": json.dumps(payload)}, files={"f1": ("d.png", img_d, "image/png"), "f2": ("w.png", img_w, "image/png")})
 
 # --- 5. メイン実行 ---
 def main():
-    print(f"🔭 憲章3.4 v2.1 高精度分析モード開始 (JST: {datetime.now(JST).strftime('%Y-%m-%d %H:%M')})...")
+    curr_jst = datetime.now(JST).strftime('%Y-%m-%d %H:%M')
+    print(f"🔭 憲章3.4 v2.1 Tier S 厳選スキャン開始 (JST: {curr_jst})...")
     targets = []
     if os.path.exists('gmo_symbols.csv'):
         df_csv = pd.read_csv('gmo_symbols.csv', sep=None, engine='python')
@@ -133,7 +133,7 @@ def main():
             else: pass
         except: continue
 
-    print(f"🏁 最終候補: {len(final_hits)} 銘柄。AI【Tier分析】を開始...")
+    print(f"🏁 最終候補: {len(final_hits)} 銘柄。AI【Tier S 審査】を開始...")
 
     for hit in final_hits:
         try:
@@ -145,7 +145,6 @@ def main():
             if not img_d or not img_w: continue
             
             chk_str = "\n".join([f"{'●' if v else '×'} {k}" for k, v in hit['Details'].items()])
-            # --- 日本時間でフォーマット ---
             curr_time_jst = datetime.now(JST).strftime('%Y-%m-%d %H:%M')
             
             prompt = f"""
@@ -155,14 +154,13 @@ def main():
             【システムによる憲章規準チェック】
             {chk_str}
 
-            添付の日足・週足チャートを精査し、以下のTierを決定せよ：
-            - Tier S: テクニカル・ファンダメンタル共に極めて優位性が高く、確信度が非常に高い。
-            - Tier A: 優位性は認められるが、市場環境や細部に懸念が残る。
-            - Tier B以下: 条件は満たすが、期待値が低い、または「だまし」の懸念がある。
+            添付の日足・週足チャートを精査し、以下のTierを厳格に決定せよ：
+            - Tier S: テクニカル・ファンダメンタル共に完璧で、一切の妥協がない。
+            - Tier A/B以下: わずかでも懸念がある場合。
 
             【分析指令】
-            1. ビジネスモデル解析: この企業/商品が現在直面しているマーケットトレンドと業界内地位を述べよ。
-            2. テクニカル検証: 憲章規準が「本物」か、視覚的に確証を得られるか。
+            1. ビジネスモデル解析: 現在のマーケットトレンドと競合優位性を述べよ。
+            2. テクニカル検証: 規準チェックの数値が視覚的にも完璧な形状（だましではない）を示しているか。
             3. 総合評価: 上記を統合し、Tierを決定せよ。
 
             回答フォーマット厳守：
@@ -175,10 +173,10 @@ def main():
             {chk_str}
 
             【ビジネスモデル & 業界分析】
-            (ここに記述)
+            (ここに詳細に記述)
 
             【総合分析コメント】
-            (ここに記述)
+            (ここに詳細に記述)
             """
             
             response = client.models.generate_content(model=MODEL_NAME, contents=[prompt, 
@@ -186,18 +184,24 @@ def main():
                 genai.types.Part.from_bytes(data=img_w.read(), mime_type="image/png")])
             
             res_text = response.text
-            tier = "Tier B"
-            if "Tier S" in res_text: tier = "Tier S"
-            elif "Tier A" in res_text: tier = "Tier A"
             
-            if tier in ["Tier S", "Tier A"]:
+            # --- タイポ修正：結論行から正確にTierを抽出 ---
+            tier = "Tier B"
+            first_lines = res_text.split('---')[0] # フォーマットのヘッダー部分のみを確認
+            if "■結論: Tier S" in first_lines or "■結論: [Tier S]" in first_lines:
+                tier = "Tier S"
+            elif "■結論: Tier A" in first_lines or "■結論: [Tier A]" in first_lines:
+                tier = "Tier A"
+            
+            # --- Tier S のみ通知・保存を実行 ---
+            if tier == "Tier S":
                 judge = "EXECUTE" if "EXECUTE" in res_text.upper() else "WAIT"
                 post_to_notion(f"{name} ({symbol})", mode, judge, tier, entry_price, res_text)
                 img_d.seek(0); img_w.seek(0)
                 post_to_discord(name, mode, judge, tier, res_text, img_d, img_w)
-                print(f"✅ 通知完了[{tier}]: {name}")
+                print(f"✅ 【Tier S】通知完了: {name}")
             else:
-                print(f"  [x] {name} は {tier} のため通知をスキップしました。")
+                print(f"  [x] {name} は {tier} のため、通知をスキップしました。")
             
             time.sleep(2)
         except Exception as e: print(f"⚠️ 分析エラー: {e}")
