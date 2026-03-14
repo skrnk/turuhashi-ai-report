@@ -20,7 +20,7 @@ NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 NOTION_DB_ID = os.environ.get("NOTION_DATABASE_ID")
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL")
 
-# --- 1. シンボル翻訳辞書 (デグレ防止) ---
+# --- 1. シンボル翻訳辞書 (デグレ防止：完全版) ---
 def get_yf_symbol(symbol):
     s = str(symbol).split(':')[-1].strip()
     mapping = {
@@ -36,10 +36,11 @@ def get_yf_symbol(symbol):
     if s in mapping: return mapping[s]
     return f"{s}.T" if s.isdigit() else s
 
-# --- 2. 憲章3.4 v2.1 判定ロジック (原本同期) ---
+# --- 2. 憲章3.4 v2.1 判定ロジック ---
 def calculate_charter_logic(data):
     if len(data) < 75: return None, "データ本数不足"
     close, high, low, vol = data['Close'], data['High'], data['Low'], data['Volume']
+    
     delta = close.diff()
     avg_gain = delta.where(delta > 0, 0).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
     avg_loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
@@ -50,14 +51,28 @@ def calculate_charter_logic(data):
     slope_ok = sma25.iloc[-1] > sma25.iloc[-4]
     c_qual = ((close - low) / (high - low)).iloc[-1]
     
-    cond_a = {"RSI > 50": rsi > 50, "5MA > 25MA": sma5.iloc[-1] > sma25.iloc[-1], "Slope OK": slope_ok, "RVol > 1.2x": rvol > 1.2, "Price > 75MA": close.iloc[-1] > sma75.iloc[-1], "Candle > 0.7": c_qual > 0.7}
-    cross_over = (close.iloc[-1] > sma5.iloc[-1]) and (close.iloc[-2] <= sma5.iloc[-2])
-    cond_s = {"RSI < 40": rsi < 40, "Dist < -10%": close.iloc[-1] < sma25.iloc[-1] * 0.90, "5MA Crossover": cross_over, "Candle > 0.7": c_qual > 0.7}
+    cond_a = {
+        "RSI > 50": rsi > 50,
+        "5MA > 25MA": sma5.iloc[-1] > sma25.iloc[-1],
+        "Slope OK": slope_ok,
+        "RVol > 1.2x": rvol > 1.2,
+        "Price > 75MA": close.iloc[-1] > sma75.iloc[-1],
+        "Candle > 0.7": c_qual > 0.7
+    }
     
+    cross_over = (close.iloc[-1] > sma5.iloc[-1]) and (close.iloc[-2] <= sma5.iloc[-2])
+    cond_s = {
+        "RSI < 40": rsi < 40,
+        "Dist < -10%": close.iloc[-1] < sma25.iloc[-1] * 0.90,
+        "5MA Crossover": cross_over,
+        "Candle > 0.7": c_qual > 0.7
+    }
+
     if all(cond_a.values()): return "Active (順張り)", cond_a
     if all(cond_s.values()): return "Sniper (逆張り)", cond_s
+    
     fails = [k for k, v in {**cond_a, **cond_s}.items() if not v]
-    return None, f"不適合: {', '.join(fails[:3])}"
+    return None, f"不適合項目: {', '.join(fails[:3])} 等"
 
 # --- 3. チャート生成 ---
 def create_chart_bytes(symbol, interval="1d", n_bars=70):
@@ -66,67 +81,44 @@ def create_chart_bytes(symbol, interval="1d", n_bars=70):
         data = yf.download(yf_symbol, period="2y", interval=interval, progress=False)
         if data.empty: return None, 0
         if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.get_level_values(0)
+        
         plot_data = data.tail(n_bars).copy()
         plot_data['SMA25'] = data['Close'].rolling(25).mean().tail(n_bars)
         plot_data['SMA75'] = data['Close'].rolling(75).mean().tail(n_bars)
+        
         buf = io.BytesIO()
-        ap = [mpf.make_addplot(plot_data['SMA25'], color='orange'), mpf.make_addplot(plot_data['SMA75'], color='blue')]
-        mpf.plot(plot_data, type='candle', style='charles', addplot=ap, volume=True, savefig=buf, datetime_format='%y-%m-%d', tight_layout=True)
+        ap = [
+            mpf.make_addplot(plot_data['SMA25'], color='orange', width=1.5),
+            mpf.make_addplot(plot_data['SMA75'], color='blue', width=1.5)
+        ]
+        mpf.plot(plot_data, type='candle', style='charles', addplot=ap, volume=True, 
+                 savefig=buf, datetime_format='%y-%m-%d', tight_layout=True)
         buf.seek(0)
         return buf, data['Close'].iloc[-1]
     except: return None, 0
 
-# --- 4. 通知・Notion処理 ---
+# --- 4. 通知処理 ---
 def post_to_notion(name, strategy, judge, tier, entry_price, analysis):
     if not NOTION_TOKEN or not NOTION_DB_ID: return
     headers = {"Authorization": f"Bearer {NOTION_TOKEN}", "Content-Type": "application/json", "Notion-Version": "2022-06-28"}
     jst_now = datetime.now(JST).isoformat()
-    data = {"parent": {"database_id": NOTION_DB_ID}, "properties": {"Name": {"title": [{"text": {"content": name}}]}, "Strategy": {"select": {"name": strategy}}, "Judge": {"select": {"name": judge}}, "Tier": {"select": {"name": tier}}, "Entry Price": {"number": entry_price}, "Date": {"date": {"start": jst_now}}, "Analysis": {"rich_text": [{"text": {"content": analysis[:1900]}}]}}}
+    data = {
+        "parent": {"database_id": NOTION_DB_ID},
+        "properties": {
+            "Name": {"title": [{"text": {"content": name}}]},
+            "Strategy": {"select": {"name": strategy}},
+            "Judge": {"select": {"name": judge}},
+            "Tier": {"select": {"name": tier}},
+            "Entry Price": {"number": entry_price},
+            "Date": {"date": {"start": jst_now}},
+            "Analysis": {"rich_text": [{"text": {"content": analysis[:1900]}}]}
+        }
+    }
     requests.post("https://api.notion.com/v1/pages", headers=headers, json=data)
 
 def post_to_discord(name, strategy, judge, tier, analysis, img_d, img_w):
     if not DISCORD_WEBHOOK: return
-    color = 0x00ff00 # Tier SはGreen
-    payload = {"embeds": [{"title": f"🚀 {name} 【{tier}】", "description": analysis[:1800], "color": color, "image": {"url": "attachment://d.png"}}, {"image": {"url": "attachment://w.png"}}]}
-    requests.post(DISCORD_WEBHOOK, data={"payload_json": json.dumps(payload)}, files={"f1": ("d.png", img_d, "image/png"), "f2": ("w.png", img_w, "image/png")})
-
-# --- 5. メイン実行 ---
-def main():
-    jst_now_str = datetime.now(JST).strftime('%Y-%m-%d %H:%M')
-    print(f"🔭 憲章3.4 v2.1 監査・Tier選別開始 (JST: {jst_now_str})...")
-    
-    targets = []
-    if os.path.exists('gmo_symbols.csv'):
-        df_csv = pd.read_csv('gmo_symbols.csv', sep=None, engine='python')
-        targets = [{'Name': str(r.get('Name', r['Symbol'])), 'Symbol': str(r['Symbol'])} for _, r in df_csv.iterrows()]
-    
-    try:
-        q = Query().set_markets('japan').select('name', 'description').where(Column('close') <= 12000, Column('type').isin(['stock', 'etf'])).limit(250).get_scanner_data()
-        df_scan = q[1] if isinstance(q[1], pd.DataFrame) else pd.DataFrame(q[1])
-        for _, r in df_scan.iterrows():
-            targets.append({'Name': r.get('description', r['name']), 'Symbol': r['name']})
-    except: pass
-
-    seen = set()
-    final_hits = []
-    for t in targets:
-        if t['Symbol'] in seen: continue
-        seen.add(t['Symbol'])
-        try:
-            data = yf.download(get_yf_symbol(t['Symbol']), period="150d", progress=False)
-            if data.empty: continue
-            if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.get_level_values(0)
-            mode, details = calculate_charter_logic(data)
-            if mode:
-                t['Mode'], t['Details'] = mode, details
-                final_hits.append(t)
-                print(f"🎯 適合発見: {t['Name']} ({mode})")
-            else:
-                print(f"  [-] {t['Name']} ({t['Symbol']}) は不適合: {details}")
-        except: continue
-
-    print(f"🏁 最終候補: {len(final_hits)} 銘銘。AI深度分析を開始...")
-
-    for hit in final_hits:
-        try:
-            name, symbol, mode =
+    color = 0x00ff00 # Tier Sは常にGreen
+    payload = {
+        "embeds": [
+            {"title
