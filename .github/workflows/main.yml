@@ -13,15 +13,15 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12' # 最新のpandas-taには3.12が必須
+          python-version: '3.12'
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # 個別にインストールすることで、エラーの切り分けを確実にする
-          pip install pandas==2.2.2
-          pip install pandas-ta==0.3.14b0
+          # 2026年3月時点で確実に共存できるバージョンを指定
+          pip install pandas>=2.2.0
+          pip install pandas-ta>=0.4.0b0
           pip install tradingview-screener mplfinance google-genai python-dotenv websocket-client
-          # tvdatafeedを公式GitHubから直接（認証なし・確実に）インストール
+          # tvdatafeedはGitから直接が最も確実
           pip install git+https://github.com/StreamAlpha/tvdatafeed.git
       - name: Run AI Strategy
         env:
