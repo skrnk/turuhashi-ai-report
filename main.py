@@ -20,14 +20,21 @@ DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL")
 # --- 1. シンボル翻訳辞書 ---
 def get_yf_symbol(symbol):
     s = str(symbol).split(':')[-1].strip()
+    # Yahoo Finance用のシンボル変換辞書（デグレ修正版）
     mapping = {
         "NI225": "^N225", "DJI": "^DJI", "SPX": "^GSPC", "NAS100": "^NDX",
         "RTY": "^RUT", "UK100": "^FTSE", "GER40": "^GDAXI", "EUSTX50": "^STOXX50E",
-        "FRA40": "^FCHI", "HSI": "^HSI", "GOLD": "GC=F", "USOIL": "CL=F", 
-        "USDJPY": "JPY=X", "大豆": "ZS=F", "コーン": "ZC=F", "小麦": "ZW=F"
+        "FRA40": "^FCHI", "HSI": "^HSI", "XIN9": "000001.SS", "NIFTY": "^NSEI",
+        "XAUUSD": "GC=F", "XAGUSD": "SI=F", "XPTUSD": "PL=F", "XPDUSD": "PA=F",
+        "USOIL": "CL=F", "UKOIL": "BZ=F", "NATGAS": "NG=F", "VIX": "^VIX",
+        "USDJPY": "JPY=X", "大豆": "ZS=F", "コーン": "ZC=F", "小麦": "ZW=F",
+        "SOYBNUSD": "ZS=F", "CORNUSD": "ZC=F", "WHEATUSD": "ZW=F", "HG1!": "HG=F",
+        "GOLD": "GC=F"
     }
     if s in mapping: return mapping[s]
+    # 日本株（数字のみ）なら .T を付与、それ以外はそのまま（AAPL等）
     return f"{s}.T" if s.isdigit() else s
+
 
 # --- 2. 憲章3.4 v2.1 判定ロジック ---
 def calculate_charter_logic(data):
