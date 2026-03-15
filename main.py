@@ -146,7 +146,10 @@ def main():
             if not img_d or not img_w: continue
             chk_str = "\n".join([f"{'●' if v else '×'} {k}" for k, v in hit['Details'].items()])
             curr_time_jst = datetime.now(JST).strftime('%Y-%m-%d %H:%M')
-            prompt = f"銘柄: {name} ({symbol})\n戦略モード: {mode}\n【システムチェック値】\n{chk_str}\n\n【分析指令】\n1. ビジネスモデル解析: 業界トレンドと優位性を述べよ。\n2. テクニカル検証: 数値が視覚的にも本物のトレンドか。\n3. 総合評価: Tier S, Tier A, Tier B以下を決定せよ。\n※コモディティは構造的トレンド明白な場合のみTier Sとせよ。\n\n■報告日次: {curr_time_jst}\n■結論: [Tier S / Tier A / Tier B]\n■売買執行: [EXECUTE または WAIT]\n---\n【憲章チェック】\n{chk_str}\n【業界分析】\n(記述)\n【総合分析】\n(記述)"
+            
+            # AIへのプロンプトにSymbol項目を追加
+            prompt = f"銘柄: {name} ({symbol})\n戦略モード: {mode}\n【システムチェック値】\n{chk_str}\n\n【分析指令】\n1. ビジネスモデル解析: 業界トレンドと優位性を述べよ。\n2. テクニカル検証: 数値が視覚的にも本物のトレンドか。\n3. 総合評価: Tier S, Tier A, Tier B以下を決定せよ。\n※コモディティは構造的トレンド明白な場合のみTier Sとせよ。\n\n■Symbol: {symbol}\n■報告日次: {curr_time_jst}\n■結論: [Tier S / Tier A / Tier B]\n■売買執行: [EXECUTE または WAIT]\n---\n【憲章チェック】\n{chk_str}\n【業界分析】\n(記述)\n【総合分析】\n(記述)"
+            
             response = client.models.generate_content(model=MODEL_NAME, contents=[prompt, genai.types.Part.from_bytes(data=img_d.read(), mime_type="image/png"), genai.types.Part.from_bytes(data=img_w.read(), mime_type="image/png")])
             res_text = response.text
             tier = "Tier B"
