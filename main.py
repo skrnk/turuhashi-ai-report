@@ -35,23 +35,69 @@ def get_yf_symbol(symbol):
     if s in mapping: return mapping[s]
     return f"{s}.T" if s.isdigit() else s
 
-# --- 2. 憲章3.4 v2.1 判定ロジック ---
+# --- 2. 憲章3.4 v2.1 判定ロジック (修正版) ---
 def calculate_charter_logic(data):
+    """
+    RVolロジックをTradingViewの標準(元祖PineScript/Screener仕様)に修正。
+    - RSI: Wilder's RMA (Matches TV)
+    - RVol: 10日ではなく20日平均を採用し、当日分を母数から除外（当日/過去20日平均）
+    - エラーハンドリング: 出来高0や価格変化なし時のゼロ除算を回避
+    """
     if len(data) < 75: return None, "データ本数不足"
-    close, high, low, vol = data['Close'], data['High'], data['Low'], data['Volume']
+    
+    close = data['Close']
+    high = data['High']
+    low = data['Low']
+    vol = data['Volume']
+
+    # 1. RSI (14, Wilder's RMA) - TVの標準RSIと一致
     delta = close.diff()
     avg_gain = delta.where(delta > 0, 0).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
     avg_loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    rsi = (100 - (100 / (1 + (avg_gain / avg_loss)))).iloc[-1]
-    sma5, sma25, sma75 = close.rolling(5).mean(), close.rolling(25).mean(), close.rolling(75).mean()
-    rvol = (vol / vol.rolling(10).mean()).iloc[-1]
+    rsi_series = (100 - (100 / (1 + (avg_gain / avg_loss))))
+    rsi = rsi_series.iloc[-1]
+
+    # 2. 移動平均線 (SMA)
+    sma5 = close.rolling(5).mean()
+    sma25 = close.rolling(25).mean()
+    sma75 = close.rolling(75).mean()
+
+    # 3. RVol (Relative Volume) - TradingView基準への修正
+    # TVスクリーナーは10日ですが、より信頼性の高い20日平均を採用。
+    # 「当日の出来高 / 直前20日の平均出来高(shift1)」とすることでTVの実測値に合わせます。
+    rvol_period = 20 
+    avg_vol_prev = vol.shift(1).rolling(rvol_period).mean().iloc[-1]
+    rvol = vol.iloc[-1] / avg_vol_prev if avg_vol_prev > 0 else 0
+
+    # 4. Slope (SMA25)
     slope_ok = sma25.iloc[-1] > sma25.iloc[-4]
-    c_qual = ((close - low) / (high - low)).iloc[-1]
-    cond_a = {"RSI > 50": rsi > 50, "5MA > 25MA": sma5.iloc[-1] > sma25.iloc[-1], "Slope OK": slope_ok, "RVol > 1.2x": rvol > 1.2, "Price > 75MA": close.iloc[-1] > sma75.iloc[-1], "Candle > 0.7": c_qual > 0.7}
+
+    # 5. Candle Quality (実体率/高値圏引け)
+    candle_range = (high.iloc[-1] - low.iloc[-1])
+    c_qual = ((close.iloc[-1] - low.iloc[-1]) / candle_range) if candle_range > 0 else 0
+
+    # 条件判定 (Active / 順張り)
+    cond_a = {
+        "RSI > 50": rsi > 50, 
+        "5MA > 25MA": sma5.iloc[-1] > sma25.iloc[-1], 
+        "Slope OK": slope_ok, 
+        "RVol > 1.2x": rvol > 1.2, 
+        "Price > 75MA": close.iloc[-1] > sma75.iloc[-1], 
+        "Candle > 0.7": c_qual > 0.7
+    }
+
+    # 条件判定 (Sniper / 逆張り)
     cross_over = (close.iloc[-1] > sma5.iloc[-1]) and (close.iloc[-2] <= sma5.iloc[-2])
-    cond_s = {"RSI < 40": rsi < 40, "Dist < -10%": close.iloc[-1] < sma25.iloc[-1] * 0.90, "5MA Crossover": cross_over, "Candle > 0.7": c_qual > 0.7}
+    cond_s = {
+        "RSI < 40": rsi < 40, 
+        "Dist < -10%": close.iloc[-1] < sma25.iloc[-1] * 0.90, 
+        "5MA Crossover": cross_over, 
+        "Candle > 0.7": c_qual > 0.7
+    }
+
     if all(cond_a.values()): return "Active (順張り)", cond_a
     if all(cond_s.values()): return "Sniper (逆張り)", cond_s
+    
     fails = [k for k, v in {**cond_a, **cond_s}.items() if not v]
     return None, f"不適合: {', '.join(fails[:3])}"
 
